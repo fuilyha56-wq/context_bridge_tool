@@ -1,0 +1,41 @@
+{
+    "name": "context_bridge_tool",
+    "version": "1.1.0",
+    "description": "私聊与群聊上下文互通工具插件，允许大模型按用户查询记忆和聊天流上下文，并自动注入跨流上下文",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "tool",
+            "component_name": "context_memory_lookup",
+            "description": "从 Booku Memory 中检索指定用户相关记忆",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "context_stream_lookup",
+            "description": "从私聊/群聊聊天流中抓取指定用户相关上下文",
+            "dependencies": []
+        },
+        {
+            "component_type": "event_handler",
+            "component_name": "cross_stream_auto_injector",
+            "description": "在 prompt 构建时自动注入跨流上下文，使 LLM 能看到另一侧的近期对话",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0",
+    "display_name": "context_bridge_tool",
+    "categories": [
+        "tool"
+    ],
+    "tags": [
+        "chat",
+        "tool",
+        "Private Chat Optimization"
+    ]
+}
