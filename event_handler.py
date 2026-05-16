@@ -339,7 +339,26 @@ class CrossStreamAutoInjector(BaseEventHandler):
 
         current_stream = current_rows[0]
         platform = str(getattr(current_stream, "platform", "") or "")
+        chat_type = str(getattr(current_stream, "chat_type", "") or "")
         person_id = str(getattr(current_stream, "person_id", "") or "")
+
+        # 群聊的 ChatStreams.person_id 可能并非真正用户 ID，
+        # 需要从该流最近的消息中获取触发本次 prompt 的用户
+        if not person_id and chat_type == "group":
+            recent_msgs = await (
+                QueryBuilder(Messages)
+                .filter(stream_id=stream_id, platform=platform)
+                .order_by("-time")
+                .limit(5)
+                .all()
+            )
+            for msg in recent_msgs:
+                msg_person_id = getattr(msg, "person_id", None)
+                msg_sender_id = str(getattr(msg, "sender_id", "") or "")
+                bot_id = str(getattr(current_stream, "bot_id", "") or "")
+                if msg_person_id and msg_sender_id != bot_id:
+                    person_id = str(msg_person_id)
+                    break
 
         if not platform or not person_id:
             return EventDecision.SUCCESS, params

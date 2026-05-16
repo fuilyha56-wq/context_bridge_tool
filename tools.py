@@ -197,9 +197,14 @@ def _message_to_dict(
     """将 Messages 记录转为模型友好的上下文字典。"""
 
     sender_person_id = getattr(message, "person_id", None)
-    sender_role = "target_user" if sender_person_id == current_person_id else "other"
-    if sender_person_id == "bot":
+    sender_id = str(getattr(message, "sender_id", "") or "")
+    is_bot = bool(sender_id) and sender_id == str(getattr(message, "bot_id", "") or "")
+    if is_bot:
         sender_role = "bot"
+    elif sender_person_id == current_person_id:
+        sender_role = "target_user"
+    else:
+        sender_role = "other"
 
     text = getattr(message, "processed_plain_text", None) or getattr(message, "content", "")
     return {
@@ -325,9 +330,12 @@ async def _find_user_streams(
         group_stream_ids: list[str] = []
 
         if normalized_group_id:
+            filters: dict[str, Any] = {"group_id": normalized_group_id, "chat_type": _GROUP}
+            if _normalize_text(platform):
+                filters["platform"] = platform
             explicit_group_rows = await (
                 QueryBuilder(ChatStreams)
-                .filter(platform=platform, group_id=normalized_group_id, chat_type=_GROUP)
+                .filter(**filters)
                 .order_by("-last_active_time")
                 .limit(max_streams)
                 .all()

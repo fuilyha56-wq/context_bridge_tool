@@ -38,6 +38,7 @@ class ContextBridgeToolPlugin(BasePlugin):
                 components.append(CrossStreamAutoInjector)
             return components
 
+        # 配置不可用时仍返回所有组件，以避免因配置加载失败导致插件静默失效
         return [
             ContextMemoryLookupTool,
             ContextStreamLookupTool,
