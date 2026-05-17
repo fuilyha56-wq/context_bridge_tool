@@ -198,7 +198,7 @@ def _message_to_dict(
 
     sender_person_id = getattr(message, "person_id", None)
     sender_id = str(getattr(message, "sender_id", "") or "")
-    is_bot = bool(sender_id) and sender_id == str(getattr(message, "bot_id", "") or "")
+    is_bot = sender_person_id == "bot" or bool(sender_id) and sender_id == str(getattr(message, "bot_id", "") or "")
     if is_bot:
         sender_role = "bot"
     elif sender_person_id == current_person_id:
@@ -422,14 +422,27 @@ async def _get_messages_for_stream(
         return []
 
     latest_target_time = max(float(getattr(row, "time", 0.0) or 0.0) for row in target_rows)
-    rows = await (
+    before_limit = max(1, limit // 2)
+    after_limit = max(0, limit - before_limit)
+
+    before_rows = await (
         QueryBuilder(Messages)
         .filter(stream_id=stream_id, time__lte=latest_target_time)
         .order_by("-time")
-        .limit(limit)
+        .limit(before_limit)
         .all()
     )
-    return list(reversed(rows))
+    after_rows = await (
+        QueryBuilder(Messages)
+        .filter(stream_id=stream_id, time__gt=latest_target_time)
+        .order_by("time")
+        .limit(after_limit)
+        .all()
+    )
+
+    combined = list(reversed(before_rows))
+    combined.extend(after_rows)
+    return combined
 
 
 class ContextMemoryLookupTool(BaseTool):

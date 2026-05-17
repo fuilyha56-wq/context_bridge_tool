@@ -1,6 +1,6 @@
 {
     "name": "context_bridge_tool",
-    "version": "1.1.0",
+    "version": "1.1.1-alpha",
     "description": "私聊与群聊上下文互通工具插件，允许大模型按用户查询记忆和聊天流上下文，并自动注入跨流上下文",
     "author": "Lycoris",
     "dependencies": {

@@ -198,8 +198,9 @@ async def _resolve_cross_streams(
         for msg in reversed(msg_rows):  # 按时间正序
             msg_time = _format_time(getattr(msg, "time", None))
             sender_id = str(getattr(msg, "sender_id", "") or "")
+            sender_person_id = str(getattr(msg, "person_id", "") or "")
             bot_id = str(getattr(current_stream, "bot_id", "") or "")
-            is_bot = bool(bot_id and sender_id == bot_id)
+            is_bot = sender_person_id == "bot" or bool(bot_id and sender_id == bot_id)
 
             content_text = _content_preview(
                 getattr(msg, "processed_plain_text", None) or getattr(msg, "content", ""),

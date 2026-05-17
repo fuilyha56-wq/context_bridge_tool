@@ -24,7 +24,7 @@ class ContextBridgeToolConfig(BaseConfig):
             tag="plugin",
         )
         version: str = Field(
-            default="1.1.0",
+            default="1.1.1-alpha",
             description="插件版本",
             label="插件版本",
             disabled=True,
