@@ -24,7 +24,7 @@ class ContextBridgeToolConfig(BaseConfig):
             tag="plugin",
         )
         version: str = Field(
-            default="1.1.1-alpha",
+            default="1.2.0-alpha",
             description="插件版本",
             label="插件版本",
             disabled=True,
@@ -265,7 +265,7 @@ class ContextBridgeToolConfig(BaseConfig):
     class AutoInjectSection(SectionBase):
         """跨流上下文自动注入配置。
 
-        启用后，在 KFC（私聊）或 default_chatter（群聊）构建 prompt 时，
+        启用后，在指定的 prompt 构建时，
         自动查询该用户在另一侧聊天流的近期消息并注入上下文，
         使 LLM 在决策时能看到跨流上下文。
         """
@@ -274,6 +274,22 @@ class ContextBridgeToolConfig(BaseConfig):
             default=True,
             description="是否启用跨流上下文自动注入",
             label="启用自动注入",
+            tag="ai",
+        )
+        target_prompts: list[str] = Field(
+            default_factory=lambda: ["kfc_user_prompt", "default_chatter_user_prompt"],
+            description="需要自动注入跨流上下文的 prompt 模板名称列表",
+            label="目标 Prompt 列表",
+            input_type="list",
+            item_type="str",
+            tag="ai",
+        )
+        kfc_prompts: list[str] = Field(
+            default_factory=lambda: ["kfc_user_prompt"],
+            description="使用 KFC 格式注入的 prompt 名称列表（需同时在 target_prompts 中）",
+            label="KFC 格式 Prompt",
+            input_type="list",
+            item_type="str",
             tag="ai",
         )
         per_stream_limit: int = Field(

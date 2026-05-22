@@ -18,7 +18,7 @@ class ContextBridgeToolPlugin(BasePlugin):
 
     plugin_name: str = "context_bridge_tool"
     plugin_description: str = "私聊与群聊上下文互通工具插件，含自动跨流注入"
-    plugin_version: str = "1.1.1-alpha"
+    plugin_version: str = "1.2.0-alpha"
     configs: list[type] = [ContextBridgeToolConfig]
 
     def get_components(self) -> list[type]:

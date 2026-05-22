@@ -1,9 +1,12 @@
 """跨流上下文自动注入事件处理器。
 
-监听 on_prompt_build 事件，当 KFC（私聊）或 default_chatter（群聊）
-构建 user prompt 时，自动查询该用户在另一侧聊天流的近期消息，
-统一通过 values.extra 注入，使 LLM 在决策时能看到跨流上下文，
-避免 send_to 发消息时上下文割裂。
+监听 on_prompt_build 事件，当配置中指定的 prompt 模板（默认包含
+KFC 私聊和 default_chatter 群聊的 user prompt）被构建时，
+自动查询该用户在另一侧聊天流的近期消息，统一通过 values.extra 注入，
+使 LLM 在决策时能看到跨流上下文，避免 send_to 发消息时上下文割裂。
+
+目标 prompt 列表与 KFC 格式列表均可通过 auto_inject 配置项调整，
+无需修改代码即可适配新的 prompt 模板。
 
 KFC 模式下，plugin_source.py 会自动将 values.extra 中的 legacy 文本
 归一化为 ContextContribution(notice/turn)，功能与直接使用
@@ -26,11 +29,6 @@ from src.kernel.event import EventDecision
 from .config import ContextBridgeToolConfig
 
 logger = get_logger("context_bridge_tool.event_handler")
-
-# 需要拦截的 prompt 模板名
-_KFC_USER_PROMPT = "kfc_user_prompt"
-_DEFAULT_CHATTER_USER_PROMPT = "default_chatter_user_prompt"
-_TARGET_PROMPTS = {_KFC_USER_PROMPT, _DEFAULT_CHATTER_USER_PROMPT}
 
 
 def _get_config(plugin: Any) -> ContextBridgeToolConfig:
@@ -306,10 +304,11 @@ class CrossStreamAutoInjector(BaseEventHandler):
     ) -> tuple[EventDecision, dict[str, Any]]:
         """处理 on_prompt_build 事件，自动注入跨流上下文。"""
         prompt_name = params.get("name", "")
-        if prompt_name not in _TARGET_PROMPTS:
+        config = _get_config(self.plugin)
+        target_prompts = {p for p in (config.auto_inject.target_prompts or []) if p}
+        if not target_prompts or prompt_name not in target_prompts:
             return EventDecision.SUCCESS, params
 
-        config = _get_config(self.plugin)
         if not config.auto_inject.enabled:
             return EventDecision.SUCCESS, params
 
@@ -364,8 +363,9 @@ class CrossStreamAutoInjector(BaseEventHandler):
         if not platform or not person_id:
             return EventDecision.SUCCESS, params
 
-        # 判断是否为 KFC
-        is_kfc = prompt_name == _KFC_USER_PROMPT
+        # 判断是否为 KFC 格式
+        kfc_prompts = {p for p in (config.auto_inject.kfc_prompts or []) if p}
+        is_kfc = prompt_name in kfc_prompts
 
         try:
             cross_streams = await _resolve_cross_streams(
