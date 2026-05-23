@@ -16,6 +16,7 @@ context_contributions 等效，同时避免向 params 顶层添加新 key
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -58,6 +59,167 @@ def _content_preview(value: Any, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max(0, max_chars - 1)] + "…"
+
+
+def _normalize_identity(value: Any) -> str:
+    """规范化身份字段，便于比较。"""
+    return str(value or "").strip().lower()
+
+
+def _extract_value_from_text(text: str, field_names: tuple[str, ...]) -> str:
+    """从已格式化消息行中提取身份字段。"""
+    for field_name in field_names:
+        bracket_pattern = rf"\[{re.escape(field_name)}[=:：]\s*([^\]]+)\]"
+        bracket_match = re.search(bracket_pattern, text, flags=re.IGNORECASE)
+        if bracket_match:
+            return bracket_match.group(1).strip()
+
+        inline_pattern = rf"(?:^|[\s,，;；（(]){re.escape(field_name)}[=:：]\s*([^\s,，;；）)\]]+)"
+        inline_match = re.search(inline_pattern, text, flags=re.IGNORECASE)
+        if inline_match:
+            return inline_match.group(1).strip()
+    return ""
+
+
+def _extract_trigger_person_id(values: dict[str, Any]) -> str:
+    """从 prompt 构建参数中提取本轮触发用户的 person_id。"""
+    direct_keys = (
+        "person_id",
+        "sender_person_id",
+        "user_person_id",
+        "trigger_person_id",
+        "current_person_id",
+    )
+    for key in direct_keys:
+        value = _normalize_text(values.get(key))
+        if value:
+            return value
+
+    for key in ("message", "current_message", "trigger_message"):
+        message = values.get(key)
+        if message is None:
+            continue
+        value = _normalize_text(getattr(message, "person_id", "") or getattr(message, "sender_person_id", ""))
+        if value:
+            return value
+        extra = getattr(message, "extra", None)
+        if isinstance(extra, dict):
+            value = _normalize_text(extra.get("person_id") or extra.get("sender_person_id"))
+            if value:
+                return value
+
+    for key in ("unread_messages", "unreads", "messages"):
+        messages = values.get(key)
+        if not isinstance(messages, list):
+            continue
+        for message in reversed(messages):
+            value = _normalize_text(getattr(message, "person_id", "") or getattr(message, "sender_person_id", ""))
+            if value:
+                return value
+            extra = getattr(message, "extra", None)
+            if isinstance(extra, dict):
+                value = _normalize_text(extra.get("person_id") or extra.get("sender_person_id"))
+                if value:
+                    return value
+
+    text_fields = (
+        str(values.get("unreads", "") or ""),
+        str(values.get("content", "") or ""),
+        str(values.get("history", "") or ""),
+    )
+    for text in text_fields:
+        value = _extract_value_from_text(text, ("person_id", "sender_person_id"))
+        if value:
+            return value
+    return ""
+
+
+def _extract_trigger_sender_id(values: dict[str, Any]) -> str:
+    """从 prompt 构建参数中提取本轮触发用户的平台 ID。"""
+    direct_keys = (
+        "sender_id",
+        "user_id",
+        "trigger_sender_id",
+        "current_sender_id",
+    )
+    for key in direct_keys:
+        value = _normalize_text(values.get(key))
+        if value:
+            return value
+
+    for key in ("message", "current_message", "trigger_message"):
+        message = values.get(key)
+        if message is None:
+            continue
+        value = _normalize_text(getattr(message, "sender_id", "") or getattr(message, "user_id", ""))
+        if value:
+            return value
+
+    for key in ("unread_messages", "unreads", "messages"):
+        messages = values.get(key)
+        if not isinstance(messages, list):
+            continue
+        for message in reversed(messages):
+            value = _normalize_text(getattr(message, "sender_id", "") or getattr(message, "user_id", ""))
+            if value:
+                return value
+
+    text_fields = (
+        str(values.get("unreads", "") or ""),
+        str(values.get("content", "") or ""),
+        str(values.get("history", "") or ""),
+    )
+    for text in text_fields:
+        value = _extract_value_from_text(text, ("sender_id", "user_id"))
+        if value:
+            return value
+    return ""
+
+
+def _resolve_trigger_person_id_from_messages(
+    messages: list[Any],
+    *,
+    bot_id: str,
+    trigger_sender_id: str = "",
+) -> str:
+    """从最近消息中解析触发用户，优先匹配显式 sender_id。"""
+    normalized_bot_id = _normalize_identity(bot_id)
+    normalized_trigger_sender_id = _normalize_identity(trigger_sender_id)
+
+    fallback_person_id = ""
+    for msg in messages:
+        msg_person_id = _normalize_text(getattr(msg, "person_id", None))
+        if not msg_person_id:
+            continue
+        msg_sender_id = _normalize_text(getattr(msg, "sender_id", ""))
+        if normalized_bot_id and _normalize_identity(msg_sender_id) == normalized_bot_id:
+            continue
+        if normalized_trigger_sender_id and _normalize_identity(msg_sender_id) == normalized_trigger_sender_id:
+            return msg_person_id
+        if not fallback_person_id:
+            fallback_person_id = msg_person_id
+    return fallback_person_id
+
+
+def _format_actor_label(
+    *,
+    sender_name: str,
+    sender_id: str,
+    sender_person_id: str,
+    target_person_id: str,
+    is_bot: bool,
+) -> str:
+    """生成不会混淆发送者身份的时间线标签。"""
+    if is_bot:
+        return "bot"
+
+    label_parts = [sender_name or "未知发送者"]
+    if sender_id:
+        label_parts.append(f"id={sender_id}")
+    if sender_person_id:
+        label_parts.append(f"person_id={sender_person_id}")
+    role = "目标用户" if sender_person_id and sender_person_id == target_person_id else "其他群成员"
+    return f"{role}({' / '.join(label_parts)})"
 
 
 def _normalize_prompt_names(values: list[str] | None) -> set[str]:
@@ -237,10 +399,17 @@ async def _resolve_cross_streams(
                 continue
 
             if is_bot:
-                timeline_lines.append(f"[{msg_time}] bot: {content_text}")
+                actor_label = "bot"
             else:
-                sender_name = str(getattr(msg, "sender_name", "对方") or "对方")
-                timeline_lines.append(f"[{msg_time}] {sender_name}: {content_text}")
+                sender_name = str(getattr(msg, "sender_name", "") or "")
+                actor_label = _format_actor_label(
+                    sender_name=sender_name,
+                    sender_id=sender_id,
+                    sender_person_id=sender_person_id,
+                    target_person_id=person_id,
+                    is_bot=False,
+                )
+            timeline_lines.append(f"[{msg_time}] {actor_label}: {content_text}")
 
         if timeline_lines:
             scope_label = "群聊" if chat_type == "group" else "私聊"
@@ -279,17 +448,23 @@ def _build_injection_text(
     if is_kfc:
         return (
             "## 跨流上下文\n"
-            "以下是对方在其他聊天流中的近期对话，供你参考：\n\n"
+            "以下是目标用户在其他聊天流中的近期对话，供你参考。\n"
+            "每行的发送者标签会明确标出目标用户、其他群成员或 bot；"
+            "不要把“其他群成员”的发言当成目标用户说的话：\n\n"
             f"{body}\n\n"
-            "- 这是对方在其他会话中的对话记录，你可以据此理解对方当前的话题和状态，"
+            "- 这是目标用户在其他会话中的相关对话记录。只把标注为“目标用户”的行归因给目标用户，"
+            "标注为“其他群成员”的行仅作为群聊上下文；你可以据此理解目标用户当前的话题和状态，"
             "但不要直接提及或引用这些内容，除非对方主动提起。"
         )
     else:
         return (
             "## 跨流上下文\n"
-            "以下是对方在其他聊天流中的近期对话，供你参考：\n\n"
+            "以下是目标用户在其他聊天流中的近期对话，供你参考。\n"
+            "每行的发送者标签会明确标出目标用户、其他群成员或 bot；"
+            "不要把“其他群成员”的发言当成目标用户说的话：\n\n"
             f"{body}\n\n"
-            "- 这是对方在其他会话中的对话记录，供你了解对方当前的话题和状态。"
+            "- 这是目标用户在其他会话中的相关对话记录。只把标注为“目标用户”的行归因给目标用户，"
+            "标注为“其他群成员”的行仅作为群聊上下文。"
         )
 
 
@@ -429,24 +604,26 @@ class CrossStreamAutoInjector(BaseEventHandler):
         platform = str(getattr(current_stream, "platform", "") or "")
         chat_type = str(getattr(current_stream, "chat_type", "") or "")
         person_id = str(getattr(current_stream, "person_id", "") or "")
+        trigger_person_id = _extract_trigger_person_id(values)
+        trigger_sender_id = _extract_trigger_sender_id(values)
+        if trigger_person_id:
+            person_id = trigger_person_id
 
         # 群聊的 ChatStreams.person_id 可能并非真正用户 ID，
-        # 需要从该流最近的消息中获取触发本次 prompt 的用户
-        if not person_id and chat_type == "group":
+        # 需要从 prompt 元数据或该流最近的消息中获取触发本次 prompt 的用户。
+        if chat_type == "group" and not person_id:
             recent_msgs = await (
                 QueryBuilder(Messages)
                 .filter(stream_id=stream_id, platform=platform)
                 .order_by("-time")
-                .limit(5)
+                .limit(10)
                 .all()
             )
-            for msg in recent_msgs:
-                msg_person_id = getattr(msg, "person_id", None)
-                msg_sender_id = str(getattr(msg, "sender_id", "") or "")
-                bot_id = str(getattr(current_stream, "bot_id", "") or "")
-                if msg_person_id and msg_sender_id != bot_id:
-                    person_id = str(msg_person_id)
-                    break
+            person_id = _resolve_trigger_person_id_from_messages(
+                recent_msgs,
+                bot_id=str(getattr(current_stream, "bot_id", "") or ""),
+                trigger_sender_id=trigger_sender_id,
+            )
 
         if not platform or not person_id:
             return EventDecision.SUCCESS, params
