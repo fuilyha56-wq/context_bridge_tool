@@ -1,12 +1,12 @@
 """跨流上下文自动注入事件处理器。
 
-监听 on_prompt_build 事件，当配置中指定的 prompt 模板（默认包含
-KFC 私聊和 default_chatter 群聊的 user prompt）被构建时，
-自动查询该用户在另一侧聊天流的近期消息，统一通过 values.extra 注入，
+监听 on_prompt_build 事件，自动识别携带 stream_id 且具备注入通道
+的聊天 prompt 构建事件，自动查询该用户在另一侧聊天流的近期消息，
+优先通过 context_contributions 注入，否则兼容 values.extra 注入，
 使 LLM 在决策时能看到跨流上下文，避免 send_to 发消息时上下文割裂。
 
-目标 prompt 列表与 KFC 格式列表均可通过 auto_inject 配置项调整，
-无需修改代码即可适配新的 prompt 模板。
+可通过 auto_inject.target_prompts 手动补充或限制模板名称；
+NFC/KFC 结构化上下文格式列表可通过 auto_inject.kfc_prompts 调整。
 
 KFC 模式下，plugin_source.py 会自动将 values.extra 中的 legacy 文本
 归一化为 ContextContribution(notice/turn)，功能与直接使用
@@ -19,10 +19,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base import BaseEventHandler
 from src.core.models.sql_alchemy import ChatStreams, Messages
-from src.core.utils.user_query_helper import get_user_query_helper
 from src.kernel.db import QueryBuilder
 from src.kernel.event import EventDecision
 
@@ -58,6 +58,35 @@ def _content_preview(value: Any, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max(0, max_chars - 1)] + "…"
+
+
+def _normalize_prompt_names(values: list[str] | None) -> set[str]:
+    """规范化 prompt 名称列表。"""
+    return {str(item).strip() for item in values or [] if str(item).strip()}
+
+
+class _PromptTargetCache:
+    """缓存自动发现的 prompt 名称，避免每次事件都扫描管理器。"""
+
+    ttl_seconds: float = 10.0
+
+    def __init__(self) -> None:
+        self._expires_at = 0.0
+        self._names: set[str] = set()
+
+    def get_names(self, now: float) -> set[str]:
+        """返回当前已注册 prompt 名称，缓存过期后自动刷新。"""
+        if now < self._expires_at:
+            return set(self._names)
+
+        try:
+            self._names = _normalize_prompt_names(prompt_api.list_templates())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"自动获取 Prompt 列表失败: {exc}")
+            self._names = set()
+
+        self._expires_at = now + self.ttl_seconds
+        return set(self._names)
 
 
 async def _resolve_cross_streams(
@@ -267,9 +296,8 @@ def _build_injection_text(
 class CrossStreamAutoInjector(BaseEventHandler):
     """跨流上下文自动注入器。
 
-    监听 on_prompt_build 事件，当 KFC 或 default_chatter
-    构建 user prompt 时，自动查询该用户在另一侧聊天流的近期消息，
-    并注入到 prompt 中，使 LLM 能看到跨流上下文。
+    监听 on_prompt_build 事件，自动识别已注册 prompt、虚拟 prompt 事件名
+    与结构化 context_contributions 通道，注入该用户另一侧聊天流的近期消息。
     """
 
     handler_name: str = "cross_stream_auto_injector"
@@ -283,6 +311,7 @@ class CrossStreamAutoInjector(BaseEventHandler):
     def __init__(self, plugin: Any) -> None:
         super().__init__(plugin)
         self._recent_queries = {}
+        self._prompt_target_cache = _PromptTargetCache()
 
     def _get_cooldown_seconds(self) -> int:
         """从配置读取冷却秒数。"""
@@ -299,33 +328,92 @@ class CrossStreamAutoInjector(BaseEventHandler):
         for sid in expired:
             self._recent_queries.pop(sid, None)
 
+    def _resolve_target_prompts(
+        self,
+        config: ContextBridgeToolConfig,
+        now: float,
+    ) -> set[str]:
+        """返回手动列表与已注册模板的并集，供显式白名单场景使用。"""
+        manual_prompts = _normalize_prompt_names(config.auto_inject.target_prompts)
+        discovered_prompts = self._prompt_target_cache.get_names(now)
+        return discovered_prompts | manual_prompts
+
+    @staticmethod
+    def _looks_like_turn_prompt(prompt_name: str) -> bool:
+        """判断 prompt 名称是否像单轮用户/对话输入。"""
+        normalized = prompt_name.strip().lower().replace(".", "_").replace("-", "_")
+        return normalized.endswith("user_prompt") or normalized.endswith("turn_prompt")
+
+    @classmethod
+    def _can_inject_into_prompt(
+        cls,
+        prompt_name: str,
+        params: dict[str, Any],
+        values: dict[str, Any],
+    ) -> bool:
+        """判断当前 prompt 构建参数是否具备注入通道。"""
+        if not values.get("stream_id"):
+            return False
+        if "extra" in values:
+            return True
+        if isinstance(params.get("context_contributions"), list):
+            return True
+        return cls._looks_like_turn_prompt(prompt_name)
+
+    @classmethod
+    def _is_prompt_allowed(
+        cls,
+        prompt_name: str,
+        params: dict[str, Any],
+        values: dict[str, Any],
+        target_prompts: set[str],
+        auto_discover_prompts: bool,
+    ) -> bool:
+        """判断当前 prompt 构建事件是否允许注入。"""
+        if not cls._can_inject_into_prompt(prompt_name, params, values):
+            return False
+        if prompt_name in target_prompts:
+            return True
+        return auto_discover_prompts
+
     async def execute(
         self, event_name: str, params: dict[str, Any]
     ) -> tuple[EventDecision, dict[str, Any]]:
         """处理 on_prompt_build 事件，自动注入跨流上下文。"""
-        prompt_name = params.get("name", "")
         config = _get_config(self.plugin)
-        target_prompts = {p for p in (config.auto_inject.target_prompts or []) if p}
-        if not target_prompts or prompt_name not in target_prompts:
-            return EventDecision.SUCCESS, params
-
         if not config.auto_inject.enabled:
             return EventDecision.SUCCESS, params
 
-        # 从 values 中提取 stream_id 和平台信息
-        values: dict[str, Any] = params.get("values", {})
+        prompt_name = _normalize_text(params.get("name", ""))
+        values_raw = params.get("values", {})
+        if not prompt_name or not isinstance(values_raw, dict):
+            return EventDecision.SUCCESS, params
+
+        # 只有携带 stream_id 且具备注入通道的 prompt 才适合跨流注入。
+        # 已注册模板、NFC_user_prompt 这类虚拟事件名、以及显式 context_contributions
+        # 通道都会在 _is_prompt_allowed 中统一判断，避免漏掉非 PromptManager 注册路径。
+        values: dict[str, Any] = values_raw
         stream_id = _normalize_text(values.get("stream_id", ""))
+        if not stream_id:
+            return EventDecision.SUCCESS, params
+
+        now = time.time()
+        target_prompts = self._resolve_target_prompts(config, now)
+        if not self._is_prompt_allowed(
+            prompt_name=prompt_name,
+            params=params,
+            values=values,
+            target_prompts=target_prompts,
+            auto_discover_prompts=bool(getattr(config.auto_inject, "auto_discover_prompts", True)),
+        ):
+            return EventDecision.SUCCESS, params
 
         # 冷却检查
-        now = time.time()
         self._prune_cooldown(now)
         cooldown = self._get_cooldown_seconds()
         if stream_id and stream_id in self._recent_queries:
             if now - self._recent_queries[stream_id] < cooldown:
                 return EventDecision.SUCCESS, params
-
-        if not stream_id:
-            return EventDecision.SUCCESS, params
 
         # 解析当前流的平台和 person_id
         current_rows = await (
@@ -364,7 +452,7 @@ class CrossStreamAutoInjector(BaseEventHandler):
             return EventDecision.SUCCESS, params
 
         # 判断是否为 KFC 格式
-        kfc_prompts = {p for p in (config.auto_inject.kfc_prompts or []) if p}
+        kfc_prompts = _normalize_prompt_names(config.auto_inject.kfc_prompts)
         is_kfc = prompt_name in kfc_prompts
 
         try:
@@ -387,15 +475,29 @@ class CrossStreamAutoInjector(BaseEventHandler):
 
         injection_text = _build_injection_text(cross_streams, is_kfc=is_kfc)
 
-        # KFC 和 default_chatter 统一通过 values.extra 注入
-        # 注意：不能向 params 顶层添加新 key（如 context_contributions），
-        # 否则 EventBus next_params 签名不一致校验会丢弃整个处理器的影响。
-        # KFC 的 plugin_source.py 会自动将 values.extra 中的 legacy 文本
-        # 归一化为 ContextContribution(notice/turn)，功能等效。
-        existing_extra: str = values.get("extra", "") or ""
-        separator = "\n\n" if existing_extra else ""
-        values["extra"] = existing_extra + separator + injection_text
-        params["values"] = values
+        context_contributions = params.get("context_contributions")
+        if isinstance(context_contributions, list):
+            context_contributions.append(
+                {
+                    "source": "context_bridge_tool.cross_stream_auto_injector",
+                    "owner": "notice",
+                    "scope": "turn",
+                    "priority": 0,
+                    "ttl_turns": 1,
+                    "content": injection_text,
+                }
+            )
+            params["context_contributions"] = context_contributions
+        else:
+            # default_chatter 与 NFC/KFC 兼容入口统一通过 values.extra 注入。
+            # 注意：不能向 params 顶层新增 key（如 context_contributions），
+            # 否则 EventBus next_params 签名不一致校验会丢弃整个处理器的影响。
+            # NFC 的 plugin_source.py 会自动将 values.extra 中的 legacy 文本
+            # 归一化为 ContextContribution(notice/turn)，功能等效。
+            existing_extra: str = values.get("extra", "") or ""
+            separator = "\n\n" if existing_extra else ""
+            values["extra"] = existing_extra + separator + injection_text
+            params["values"] = values
 
         stream_count = len(cross_streams)
         logger.info(

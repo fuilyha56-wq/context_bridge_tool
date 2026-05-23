@@ -276,18 +276,27 @@ class ContextBridgeToolConfig(BaseConfig):
             label="启用自动注入",
             tag="ai",
         )
+        auto_discover_prompts: bool = Field(
+            default=True,
+            description=(
+                "是否自动识别可注入的 prompt 构建事件；启用后无需手动维护目标 Prompt 列表，"
+                "携带 stream_id 且支持 extra 注入的聊天 Prompt 会自动生效，含 NFC_user_prompt 这类未注册虚拟事件名"
+            ),
+            label="自动识别 Prompt",
+            tag="ai",
+        )
         target_prompts: list[str] = Field(
-            default_factory=lambda: ["kfc_user_prompt", "default_chatter_user_prompt"],
-            description="需要自动注入跨流上下文的 prompt 模板名称列表",
-            label="目标 Prompt 列表",
+            default_factory=list,
+            description="手动补充需要自动注入跨流上下文的 prompt 模板名称；通常留空，系统会自动识别可注入 Prompt",
+            label="手动补充 Prompt 列表",
             input_type="list",
             item_type="str",
             tag="ai",
         )
         kfc_prompts: list[str] = Field(
-            default_factory=lambda: ["kfc_user_prompt"],
-            description="使用 KFC 格式注入的 prompt 名称列表（需同时在 target_prompts 中）",
-            label="KFC 格式 Prompt",
+            default_factory=lambda: ["kfc_user_prompt", "NFC_user_prompt", "nfc_user_prompt"],
+            description="使用 NFC/KFC 结构化上下文格式注入的 prompt 名称列表；通常无需手动调整",
+            label="NFC/KFC 格式 Prompt",
             input_type="list",
             item_type="str",
             tag="ai",
